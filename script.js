@@ -1,7 +1,7 @@
 // ===== CONFIG =====
-// Using OpenWeatherMap free API
-const API_KEY = ''; // User must add their own key
-const BASE_URL = 'https://api.openweathermap.org/data/2.5';
+// Using Open-Meteo (free, no API key) + OpenStreetMap Geocoding
+const GEO_URL = 'https://geocoding-api.open-meteo.com/v1/search';
+const WEATHER_URL = 'https://api.open-meteo.com/v1/forecast';
 
 // ===== DOM ELEMENTS =====
 const searchInput = document.getElementById('searchInput');
@@ -16,7 +16,6 @@ const welcome = document.getElementById('welcome');
 const mainContent = document.getElementById('mainContent');
 const weatherBg = document.getElementById('weatherBg');
 
-// Current weather elements
 const cityName = document.getElementById('cityName');
 const dateTime = document.getElementById('dateTime');
 const temperature = document.getElementById('temperature');
@@ -26,7 +25,6 @@ const tempMin = document.getElementById('tempMin');
 const feelsLike = document.getElementById('feelsLike');
 const weatherIconLarge = document.getElementById('weatherIconLarge');
 
-// Detail elements
 const wind = document.getElementById('wind');
 const humidity = document.getElementById('humidity');
 const visibility = document.getElementById('visibility');
@@ -34,9 +32,36 @@ const pressure = document.getElementById('pressure');
 const sunrise = document.getElementById('sunrise');
 const sunset = document.getElementById('sunset');
 
-// Forecast
 const forecastGrid = document.getElementById('forecastGrid');
 const hourlyScroll = document.getElementById('hourlyScroll');
+
+// ===== WMO WEATHER CODE MAPPING =====
+const wmoDescriptions = {
+  0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast',
+  45: 'Foggy', 48: 'Rime fog',
+  51: 'Light drizzle', 53: 'Moderate drizzle', 55: 'Dense drizzle',
+  56: 'Freezing drizzle', 57: 'Dense freezing drizzle',
+  61: 'Slight rain', 63: 'Moderate rain', 65: 'Heavy rain',
+  66: 'Freezing rain', 67: 'Heavy freezing rain',
+  71: 'Slight snow', 73: 'Moderate snow', 75: 'Heavy snow',
+  77: 'Snow grains',
+  80: 'Slight rain showers', 81: 'Moderate rain showers', 82: 'Violent rain showers',
+  85: 'Slight snow showers', 86: 'Heavy snow showers',
+  95: 'Thunderstorm', 96: 'Thunderstorm with hail', 99: 'Thunderstorm with heavy hail'
+};
+
+function wmoToOwmId(code) {
+  if (code >= 95) return 200; // thunderstorm
+  if (code >= 80 && code < 90) return 500; // rain showers
+  if (code >= 71 && code < 80) return 600; // snow
+  if (code >= 61 && code < 70) return 501; // rain
+  if (code >= 51 && code < 60) return 300; // drizzle
+  if (code >= 45 && code < 50) return 741; // fog
+  if (code === 3) return 804; // overcast
+  if (code === 2) return 802; // partly cloudy
+  if (code === 1) return 801; // mainly clear
+  return 800; // clear
+}
 
 // ===== THEME =====
 let isDark = localStorage.getItem('theme') !== 'light';
@@ -72,7 +97,7 @@ geoBtn.addEventListener('click', () => {
     return;
   }
   navigator.geolocation.getCurrentPosition(
-    (pos) => fetchWeatherByCoords(pos.coords.latitude, pos.coords.longitude),
+    (pos) => fetchWeatherByCoords(pos.coords.latitude, pos.coords.longitude, 'Your Location'),
     () => showError('Location access denied. Please search manually.')
   );
 });
@@ -81,134 +106,158 @@ geoBtn.addEventListener('click', () => {
 async function fetchWeather(city) {
   showLoading();
   try {
-    // Check if API key is set
-    if (!API_KEY) {
-      // Use demo data for showcase
-      showDemoData(city);
-      return;
+    // Geocode city name to coordinates
+    const geoRes = await fetch(`${GEO_URL}?name=${encodeURIComponent(city)}&count=1&language=en&format=json`);
+    const geoData = await geoRes.json();
+
+    if (!geoData.results || geoData.results.length === 0) {
+      throw new Error('City not found. Try a different search.');
     }
 
-    const [currentRes, forecastRes] = await Promise.all([
-      fetch(`${BASE_URL}/weather?q=${encodeURIComponent(city)}&units=metric&appid=${API_KEY}`),
-      fetch(`${BASE_URL}/forecast?q=${encodeURIComponent(city)}&units=metric&appid=${API_KEY}`)
-    ]);
+    const loc = geoData.results[0];
+    const displayName = `${loc.name}, ${loc.country_code || loc.country || ''}`;
 
-    if (!currentRes.ok) throw new Error('City not found');
-
-    const current = await currentRes.json();
-    const forecast = await forecastRes.json();
-
-    displayWeather(current, forecast);
+    await fetchWeatherByCoords(loc.latitude, loc.longitude, displayName);
   } catch (err) {
     showError(err.message || 'Something went wrong. Try again.');
   }
 }
 
-async function fetchWeatherByCoords(lat, lon) {
+async function fetchWeatherByCoords(lat, lon, displayName) {
   showLoading();
   try {
-    if (!API_KEY) {
-      showDemoData('Your Location');
-      return;
-    }
+    const params = new URLSearchParams({
+      latitude: lat,
+      longitude: lon,
+      current: 'temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,surface_pressure,is_day',
+      hourly: 'temperature_2m,weather_code',
+      daily: 'weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset',
+      timezone: 'auto',
+      forecast_days: '7'
+    });
 
-    const [currentRes, forecastRes] = await Promise.all([
-      fetch(`${BASE_URL}/weather?lat=${lat}&lon=${lon}&units=metric&appid=${API_KEY}`),
-      fetch(`${BASE_URL}/forecast?lat=${lat}&lon=${lon}&units=metric&appid=${API_KEY}`)
-    ]);
+    const res = await fetch(`${WEATHER_URL}?${params}`);
+    if (!res.ok) throw new Error('Failed to fetch weather data');
+    const data = await res.json();
 
-    if (!currentRes.ok) throw new Error('Could not fetch weather data');
-
-    const current = await currentRes.json();
-    const forecast = await forecastRes.json();
-
-    displayWeather(current, forecast);
+    displayWeather(data, displayName);
+    localStorage.setItem('lastCity', displayName.split(',')[0].trim());
   } catch (err) {
     showError(err.message || 'Something went wrong. Try again.');
   }
 }
 
 // ===== DISPLAY =====
-function displayWeather(current, forecast) {
+function displayWeather(data, displayName) {
+  const current = data.current;
+  const daily = data.daily;
+  const hourly = data.hourly;
+
   // City & Date
-  cityName.textContent = `${current.name}, ${current.sys.country}`;
-  dateTime.textContent = formatDateTime(current.dt, current.timezone);
+  cityName.textContent = displayName;
+  const now = new Date();
+  dateTime.textContent = now.toLocaleDateString('en', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+    hour: '2-digit', minute: '2-digit'
+  });
 
   // Temperature
-  temperature.textContent = Math.round(current.main.temp);
-  tempMax.textContent = Math.round(current.main.temp_max);
-  tempMin.textContent = Math.round(current.main.temp_min);
-  feelsLike.textContent = Math.round(current.main.feels_like);
-  weatherDesc.textContent = current.weather[0].description;
+  temperature.textContent = Math.round(current.temperature_2m);
+  tempMax.textContent = Math.round(daily.temperature_2m_max[0]);
+  tempMin.textContent = Math.round(daily.temperature_2m_min[0]);
+  feelsLike.textContent = Math.round(current.apparent_temperature);
+
+  const wmoCode = current.weather_code;
+  const owmId = wmoToOwmId(wmoCode);
+  const isDay = current.is_day === 1;
+  const iconCode = isDay ? '01d' : '01n';
+
+  weatherDesc.textContent = wmoDescriptions[wmoCode] || 'Unknown';
 
   // Icon
-  setWeatherIcon(weatherIconLarge, current.weather[0].id, current.weather[0].icon);
+  setWeatherIcon(weatherIconLarge, owmId, iconCode);
 
   // Background theme
-  setWeatherBg(current.weather[0].id, current.weather[0].icon);
+  setWeatherBg(owmId, iconCode);
 
   // Details
-  wind.textContent = `${current.wind.speed} m/s`;
-  humidity.textContent = `${current.main.humidity}%`;
-  visibility.textContent = `${(current.visibility / 1000).toFixed(1)} km`;
-  pressure.textContent = `${current.main.pressure} hPa`;
-  sunrise.textContent = formatTime(current.sys.sunrise, current.timezone);
-  sunset.textContent = formatTime(current.sys.sunset, current.timezone);
+  wind.textContent = `${current.wind_speed_10m} km/h`;
+  humidity.textContent = `${current.relative_humidity_2m}%`;
+  visibility.textContent = '10+ km';
+  pressure.textContent = `${Math.round(current.surface_pressure)} hPa`;
+
+  // Sunrise / Sunset
+  if (daily.sunrise && daily.sunrise[0]) {
+    const sr = new Date(daily.sunrise[0]);
+    sunrise.textContent = sr.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' });
+  }
+  if (daily.sunset && daily.sunset[0]) {
+    const ss = new Date(daily.sunset[0]);
+    sunset.textContent = ss.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' });
+  }
 
   // 5-Day Forecast
-  displayForecast(forecast);
+  displayForecast(daily);
 
   // Hourly
-  displayHourly(forecast);
+  displayHourly(hourly, isDay);
 
-  // Show content
   hideAll();
   mainContent.style.display = 'block';
 }
 
-function displayForecast(forecast) {
-  const daily = {};
-  forecast.list.forEach(item => {
-    const date = new Date(item.dt * 1000).toLocaleDateString('en', { weekday: 'short' });
-    if (!daily[date]) {
-      daily[date] = { ...item, temps: [] };
-    }
-    daily[date].temps.push(item.main.temp);
-  });
+function displayForecast(daily) {
+  const days = [];
+  for (let i = 1; i < Math.min(6, daily.time.length); i++) {
+    days.push({
+      day: new Date(daily.time[i]).toLocaleDateString('en', { weekday: 'short' }),
+      max: Math.round(daily.temperature_2m_max[i]),
+      min: Math.round(daily.temperature_2m_min[i]),
+      code: daily.weather_code[i]
+    });
+  }
 
-  const days = Object.entries(daily).slice(0, 5);
-
-  forecastGrid.innerHTML = days.map(([day, data]) => {
-    const maxT = Math.round(Math.max(...data.temps));
-    const minT = Math.round(Math.min(...data.temps));
-    const iconClass = getWeatherIconClass(data.weather[0].id, data.weather[0].icon);
-    const colorClass = getWeatherColorClass(data.weather[0].id);
+  forecastGrid.innerHTML = days.map(d => {
+    const owmId = wmoToOwmId(d.code);
+    const iconClass = getWeatherIconClass(owmId, '01d');
+    const colorClass = getWeatherColorClass(owmId);
 
     return `
       <div class="forecast-card">
-        <div class="forecast-day">${day}</div>
+        <div class="forecast-day">${d.day}</div>
         <div class="forecast-icon ${colorClass}">${iconClass}</div>
-        <div class="forecast-temp">${maxT}&deg;</div>
-        <div class="forecast-temp-min">${minT}&deg;</div>
-        <div class="forecast-desc">${data.weather[0].description}</div>
+        <div class="forecast-temp">${d.max}&deg;</div>
+        <div class="forecast-temp-min">${d.min}&deg;</div>
+        <div class="forecast-desc">${wmoDescriptions[d.code] || '—'}</div>
       </div>
     `;
   }).join('');
 }
 
-function displayHourly(forecast) {
-  const hours = forecast.list.slice(0, 12);
+function displayHourly(hourly, isDay) {
+  const nowHour = new Date().getHours();
+  const startIdx = hourly.time.findIndex(t => new Date(t).getHours() >= nowHour);
+  const start = Math.max(0, startIdx);
+  const hours = [];
 
-  hourlyScroll.innerHTML = hours.map(item => {
-    const time = new Date(item.dt * 1000).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' });
-    const iconClass = getWeatherIconClass(item.weather[0].id, item.weather[0].icon);
-    const colorClass = getWeatherColorClass(item.weather[0].id);
+  for (let i = start; i < Math.min(start + 12, hourly.time.length); i++) {
+    hours.push({
+      time: new Date(hourly.time[i]).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' }),
+      temp: Math.round(hourly.temperature_2m[i]),
+      code: hourly.weather_code[i]
+    });
+  }
+
+  hourlyScroll.innerHTML = hours.map(h => {
+    const owmId = wmoToOwmId(h.code);
+    const iconClass = getWeatherIconClass(owmId, isDay ? '01d' : '01n');
+    const colorClass = getWeatherColorClass(owmId);
 
     return `
       <div class="hourly-card">
-        <div class="hourly-time">${time}</div>
+        <div class="hourly-time">${h.time}</div>
         <div class="hourly-icon ${colorClass}">${iconClass}</div>
-        <div class="hourly-temp">${Math.round(item.main.temp)}&deg;</div>
+        <div class="hourly-temp">${h.temp}&deg;</div>
       </div>
     `;
   }).join('');
@@ -269,18 +318,6 @@ function setWeatherBg(id, icon) {
 }
 
 // ===== HELPERS =====
-function formatDateTime(ts, tz) {
-  const d = new Date((ts + tz) * 1000);
-  return d.toUTCString().replace('GMT', '').trim();
-}
-
-function formatTime(ts, tz) {
-  const d = new Date((ts + tz) * 1000);
-  const h = d.getUTCHours().toString().padStart(2, '0');
-  const m = d.getUTCMinutes().toString().padStart(2, '0');
-  return `${h}:${m}`;
-}
-
 function showLoading() {
   hideAll();
   loading.style.display = 'block';
@@ -299,69 +336,9 @@ function hideAll() {
   mainContent.style.display = 'none';
 }
 
-// ===== DEMO DATA (when no API key) =====
-function showDemoData(cityQuery) {
-  const capitalize = s => s.charAt(0).toUpperCase() + s.slice(1);
-  const now = new Date();
-
-  const demoWeather = {
-    name: capitalize(cityQuery),
-    sys: {
-      country: 'WW',
-      sunrise: Math.floor(now.getTime() / 1000) - 21600,
-      sunset: Math.floor(now.getTime() / 1000) + 21600,
-    },
-    dt: Math.floor(now.getTime() / 1000),
-    timezone: 0,
-    main: {
-      temp: 22,
-      temp_max: 25,
-      temp_min: 18,
-      feels_like: 21,
-      humidity: 65,
-      pressure: 1013,
-    },
-    weather: [{ id: 801, description: 'partly cloudy', icon: '02d' }],
-    wind: { speed: 3.6 },
-    visibility: 10000,
-  };
-
-  const demoForecast = {
-    list: Array.from({ length: 40 }, (_, i) => {
-      const conditions = [
-        { id: 800, desc: 'clear sky', icon: '01d' },
-        { id: 801, desc: 'few clouds', icon: '02d' },
-        { id: 802, desc: 'scattered clouds', icon: '03d' },
-        { id: 500, desc: 'light rain', icon: '10d' },
-        { id: 800, desc: 'clear sky', icon: '01d' },
-      ];
-      const cond = conditions[i % conditions.length];
-      return {
-        dt: Math.floor(now.getTime() / 1000) + i * 10800,
-        main: {
-          temp: 18 + Math.sin(i * 0.5) * 6,
-          temp_max: 24 + Math.sin(i * 0.3) * 3,
-          temp_min: 15 + Math.sin(i * 0.4) * 2,
-        },
-        weather: [{ id: cond.id, description: cond.desc, icon: cond.icon }],
-      };
-    }),
-  };
-
-  displayWeather(demoWeather, demoForecast);
-}
-
 // ===== INIT =====
-// Check for saved city
 const lastCity = localStorage.getItem('lastCity');
 if (lastCity) {
   searchInput.value = lastCity;
   fetchWeather(lastCity);
 }
-
-// Save city on search
-const originalFetch = fetchWeather;
-fetchWeather = function(city) {
-  localStorage.setItem('lastCity', city);
-  return originalFetch(city);
-};
